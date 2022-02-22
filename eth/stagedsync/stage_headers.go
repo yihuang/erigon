@@ -55,6 +55,7 @@ type HeadersCfg struct {
 	newPayloadCh          chan privateapi.PayloadMessage
 	forkChoiceCh          chan privateapi.ForkChoiceMessage
 	waitingForBeaconChain *uint32 // atomic boolean flag
+	assemblingPayload     *uint32 // atomic boolean flag
 
 	snapshots          *snapshotsync.RoSnapshots
 	snapshotHashesCfg  *snapshothashes.Config
@@ -75,6 +76,7 @@ func StageHeadersCfg(
 	newPayloadCh chan privateapi.PayloadMessage,
 	forkChoiceCh chan privateapi.ForkChoiceMessage,
 	waitingForBeaconChain *uint32, // atomic boolean flag
+	assemblingPayload *uint32, // atomic boolean flag
 	snapshots *snapshotsync.RoSnapshots,
 	snapshotDownloader proto_downloader.DownloaderClient,
 	blockReader interfaces.FullBlockReader,
@@ -95,6 +97,7 @@ func StageHeadersCfg(
 		newPayloadCh:          newPayloadCh,
 		forkChoiceCh:          forkChoiceCh,
 		waitingForBeaconChain: waitingForBeaconChain,
+		assemblingPayload:     assemblingPayload,
 		snapshots:             snapshots,
 		snapshotDownloader:    snapshotDownloader,
 		blockReader:           blockReader,
@@ -180,6 +183,12 @@ func HeadersPOS(
 	cfg HeadersCfg,
 	useExternalTx bool,
 ) error {
+	if atomic.LoadUint32(cfg.assemblingPayload) == 1 {
+		if !useExternalTx {
+			return tx.Commit()
+		}
+		return nil
+	}
 	log.Info(fmt.Sprintf("[%s] Waiting for Beacon Chain...", s.LogPrefix()))
 
 	atomic.StoreUint32(cfg.waitingForBeaconChain, 1)

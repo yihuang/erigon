@@ -297,6 +297,7 @@ func MockWithEverything(t *testing.T, gspec *core.Genesis, key *ecdsa.PrivateKey
 				nil,
 				nil,
 				nil,
+				nil,
 				allSnapshots,
 				snapshotsDownloader,
 				blockReader,

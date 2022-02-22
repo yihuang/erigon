@@ -252,6 +252,7 @@ func NewStagedSync(
 	newPayloadCh chan privateapi.PayloadMessage,
 	forkChoiceCh chan privateapi.ForkChoiceMessage,
 	waitingForBeaconChain *uint32,
+	assemblingPayload *uint32,
 	snapshotDownloader proto_downloader.DownloaderClient,
 ) (*stagedsync.Sync, error) {
 	var blockReader interfaces.FullBlockReader
@@ -282,6 +283,7 @@ func NewStagedSync(
 				newPayloadCh,
 				forkChoiceCh,
 				waitingForBeaconChain,
+				assemblingPayload,
 				allSnapshots,
 				snapshotDownloader,
 				blockReader,

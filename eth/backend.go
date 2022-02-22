@@ -141,6 +141,7 @@ type Ethereum struct {
 	newPayloadCh          chan privateapi.PayloadMessage
 	forkChoiceCh          chan privateapi.ForkChoiceMessage
 	waitingForBeaconChain uint32 // atomic boolean flag
+	assemblingPayload     uint32 // atomic boolean flag
 
 	downloadProtocols *downloader.Protocols
 }
@@ -421,7 +422,7 @@ func New(stack *node.Node, config *ethconfig.Config, txpoolCfg txpool2.Config, l
 	// Initialize ethbackend
 	ethBackendRPC := privateapi.NewEthBackendServer(ctx, backend, backend.chainDB, backend.notifications.Events,
 		blockReader, chainConfig, backend.newPayloadCh, backend.forkChoiceCh, backend.sentryControlServer.Hd.PayloadStatusCh,
-		&backend.waitingForBeaconChain, backend.sentryControlServer.Hd.SkipCycleHack, assembleBlockPOS, config.Miner.EnabledPOS)
+		&backend.waitingForBeaconChain, &backend.assemblingPayload, backend.sentryControlServer.Hd.SkipCycleHack, assembleBlockPOS, config.Miner.EnabledPOS)
 	miningRPC = privateapi.NewMiningServer(ctx, backend, ethashApi)
 	// If we enabled the proposer flag we initiates the block proposing thread
 	if config.Miner.EnabledPOS && chainConfig.TerminalTotalDifficulty != nil {
@@ -501,7 +502,7 @@ func New(stack *node.Node, config *ethconfig.Config, txpoolCfg txpool2.Config, l
 	backend.stagedSync, err = stages2.NewStagedSync(backend.sentryCtx, backend.log, backend.chainDB,
 		stack.Config().P2P, *config, chainConfig.TerminalTotalDifficulty,
 		backend.sentryControlServer, tmpdir, backend.notifications.Accumulator,
-		backend.newPayloadCh, backend.forkChoiceCh, &backend.waitingForBeaconChain,
+		backend.newPayloadCh, backend.forkChoiceCh, &backend.waitingForBeaconChain, &backend.assemblingPayload,
 		backend.downloaderClient)
 	if err != nil {
 		return nil, err

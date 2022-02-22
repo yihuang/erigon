@@ -57,6 +57,7 @@ type EthBackendServer struct {
 	statusCh <-chan PayloadStatus
 	// Determines whether stageloop is processing a block or not
 	waitingForBeaconChain *uint32       // atomic boolean flag
+	assemblingPayload     *uint32       // atomic boolean flag
 	skipCycleHack         chan struct{} // with this channel we tell the stagedsync that we want to assemble a block
 	assemblePayloadPOS    assemblePayloadPOSFunc
 	proposing             bool
@@ -96,10 +97,10 @@ type ForkChoiceMessage struct {
 
 func NewEthBackendServer(ctx context.Context, eth EthBackend, db kv.RwDB, events *Events, blockReader interfaces.BlockAndTxnReader,
 	config *params.ChainConfig, newPayloadCh chan<- PayloadMessage, forkChoiceCh chan<- ForkChoiceMessage, statusCh <-chan PayloadStatus,
-	waitingForBeaconChain *uint32, skipCycleHack chan struct{}, assemblePayloadPOS assemblePayloadPOSFunc, proposing bool,
+	waitingForBeaconChain *uint32, assemblingPayload *uint32, skipCycleHack chan struct{}, assemblePayloadPOS assemblePayloadPOSFunc, proposing bool,
 ) *EthBackendServer {
 	return &EthBackendServer{ctx: ctx, eth: eth, events: events, db: db, blockReader: blockReader, config: config,
-		newPayloadCh: newPayloadCh, forkChoiceCh: forkChoiceCh, statusCh: statusCh, waitingForBeaconChain: waitingForBeaconChain,
+		newPayloadCh: newPayloadCh, forkChoiceCh: forkChoiceCh, statusCh: statusCh, waitingForBeaconChain: waitingForBeaconChain, assemblingPayload: assemblingPayload,
 		pendingPayloads: make(map[uint64]types2.ExecutionPayload), skipCycleHack: skipCycleHack,
 		assemblePayloadPOS: assemblePayloadPOS, proposing: proposing, syncCond: sync.NewCond(&sync.Mutex{}),
 	}
@@ -431,6 +432,9 @@ func (s *EthBackendServer) StartProposer() {
 			if s.shutdown {
 				return
 			}
+			// Tell the stage headers to leave space for the write transaction for mining stages
+			atomic.StoreUint32(s.assemblingPayload, 1)
+			s.skipCycleHack <- struct{}{}
 
 			// Go over each payload and re-update them
 			for id := range s.pendingPayloads {
@@ -442,8 +446,6 @@ func (s *EthBackendServer) StartProposer() {
 				random := gointerfaces.ConvertH256ToHash(s.pendingPayloads[id].Random)
 				coinbase := gointerfaces.ConvertH160toAddress(s.pendingPayloads[id].Coinbase)
 				timestamp := s.pendingPayloads[id].Timestamp
-				// Tell the stage headers to leave space for the write transaction for mining stages
-				s.skipCycleHack <- struct{}{}
 
 				block, err := s.assemblePayloadPOS(random, coinbase, timestamp)
 				if err != nil {
@@ -488,6 +490,7 @@ func (s *EthBackendServer) StartProposer() {
 					Transactions:  encodedTransactions,
 				}
 			}
+			atomic.StoreUint32(s.assemblingPayload, 0)
 
 			// Broadcast the signal that an entire loop over pending payloads has been executed
 			s.syncCond.Broadcast()
