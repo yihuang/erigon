@@ -808,25 +808,42 @@ func dumpStorage() {
 	}
 }
 
-func printBucket(chaindata string) {
+func printBucket(chaindata string, bucket string) {
 	db := mdbx.MustOpen(chaindata)
 	defer db.Close()
-	f, err := os.Create("bucket.txt")
+	f, err := os.Create(bucket + ".txt")
 	tool.Check(err)
 	defer f.Close()
 	fb := bufio.NewWriter(f)
 	defer fb.Flush()
+
 	if err := db.View(context.Background(), func(tx kv.Tx) error {
-		c, err := tx.Cursor(kv.StorageHistory)
+		fmt.Printf("Reading %s\n", bucket)
+
+		c, err := tx.Cursor(bucket)
 		if err != nil {
 			return err
 		}
+
+		var count int
+		startTime := time.Now()
+
 		for k, v, err := c.First(); k != nil; k, v, err = c.Next() {
 			if err != nil {
 				return err
 			}
 			fmt.Fprintf(fb, "%x %x\n", k, v)
+
+			count++
+			if count%100_000 == 0 {
+				log.Info("Processed", "row", count)
+				if count == 1_000_000 {
+					break
+				}
+			}
 		}
+
+		log.Info("Finished", "duration", time.Since(startTime))
 		return nil
 	}); err != nil {
 		panic(err)
@@ -1436,7 +1453,8 @@ func changeSetStats(chaindata string, block1, block2 uint64) error {
 				stAccounts++
 			}
 			if (stStorage+stAccounts)%100000 == 0 {
-				fmt.Printf("State records: %d\n", stStorage+stAccounts)
+				//fmt.Printf("State records: %d\n", stStorage+stAccounts)
+				log.Info("State", "total", stStorage+stAccounts)
 			}
 		}
 		return e
@@ -1453,7 +1471,8 @@ func changeSetStats(chaindata string, block1, block2 uint64) error {
 	defer tx.Rollback()
 	if err := changeset.ForRange(tx, kv.AccountChangeSet, block1, block2, func(blockN uint64, k, v []byte) error {
 		if (blockN-block1)%100000 == 0 {
-			fmt.Printf("at the block %d for accounts, booster size: %d\n", blockN, len(accounts))
+			//fmt.Printf("at the block %d for accounts, booster size: %d\n", blockN, len(accounts))
+			log.Info("Account changesets", "block", blockN, "accounts", len(accounts))
 		}
 		accounts[string(common.CopyBytes(k))] = struct{}{}
 		return nil
@@ -1464,7 +1483,8 @@ func changeSetStats(chaindata string, block1, block2 uint64) error {
 	storage := make(map[string]struct{})
 	if err := changeset.ForRange(tx, kv.StorageChangeSet, block1, block2, func(blockN uint64, k, v []byte) error {
 		if (blockN-block1)%100000 == 0 {
-			fmt.Printf("at the block %d for accounts, booster size: %d\n", blockN, len(accounts))
+			//fmt.Printf("at the block %d for storage, booster size: %d\n", blockN, len(storage))
+			log.Info("Storage changesets", "block", blockN, "len(storage)", len(storage))
 		}
 		storage[string(common.CopyBytes(k))] = struct{}{}
 		return nil
@@ -1472,7 +1492,8 @@ func changeSetStats(chaindata string, block1, block2 uint64) error {
 		return err
 	}
 
-	fmt.Printf("accounts changed: %d, storage changed: %d\n", len(accounts), len(storage))
+	//fmt.Printf("accounts changed: %d, storage changed: %d\n", len(accounts), len(storage))
+	log.Info("Finished", "len(accounts)", len(accounts), "len(storage)", len(storage))
 	return nil
 }
 
@@ -2044,6 +2065,7 @@ func fixState(chaindata string) error {
 	defer c.Close()
 	var prevHeaderKey [40]byte
 	var k, v []byte
+	var iterated int
 	for k, v, err = c.First(); err == nil && k != nil; k, v, err = c.Next() {
 		var headerKey [40]byte
 		copy(headerKey[:], k)
@@ -2065,10 +2087,17 @@ func fixState(chaindata string) error {
 			copy(parentK[8:], header.ParentHash[:])
 			if !bytes.Equal(parentK[:], prevHeaderKey[:]) {
 				fmt.Printf("broken ancestry from %d %x (parent hash %x): prevKey %x\n", header.Number.Uint64(), v, header.ParentHash, prevHeaderKey)
+				// TODO: tx.Put missing here?
+				// fixState() opens the database for write and commits the transaction at the end but does make changes
 			}
 		}
 		copy(prevHeaderKey[:], headerKey[:])
+		iterated++
+		if iterated%100_000 == 0 {
+			fmt.Printf("Iterated %d\n", iterated)
+		}
 	}
+	fmt.Printf("Done, processed %d records\n", iterated)
 	if err != nil {
 		return err
 	}
@@ -2399,7 +2428,7 @@ func main() {
 		printCurrentBlockNumber(*chaindata)
 
 	case "bucket":
-		printBucket(*chaindata)
+		printBucket(*chaindata, *bucket)
 
 	case "val-tx-lookup-2":
 		ValidateTxLookups2(*chaindata)
