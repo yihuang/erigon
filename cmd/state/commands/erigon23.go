@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,16 +15,19 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
+	"github.com/ledgerwatch/log/v3"
+	"github.com/spf13/cobra"
+
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	kv2 "github.com/ledgerwatch/erigon-lib/kv/mdbx"
 	libstate "github.com/ledgerwatch/erigon-lib/state"
-	"github.com/ledgerwatch/erigon/cmd/state/exec22"
+
 	"github.com/ledgerwatch/erigon/eth/stagedsync"
+
+	"github.com/ledgerwatch/erigon/cmd/state/exec22"
 	"github.com/ledgerwatch/erigon/turbo/services"
-	"github.com/ledgerwatch/log/v3"
-	"github.com/spf13/cobra"
 
 	"github.com/ledgerwatch/erigon/common"
 	"github.com/ledgerwatch/erigon/consensus"
@@ -43,6 +47,8 @@ func init() {
 	withDataDir(erigon23Cmd)
 	withChain(erigon23Cmd)
 
+	erigon23Cmd.Flags().IntVar(&commitmentFrequency, "commfreq", 25000, "how many blocks to skip between calculating commitment")
+	erigon23Cmd.Flags().BoolVar(&commitments, "commitments", false, "set to true to calculate commitments")
 	rootCmd.AddCommand(erigon23Cmd)
 }
 
@@ -108,12 +114,13 @@ func Erigon23(genesis *core.Genesis, chainConfig *params.ChainConfig, logger log
 		return fmt.Errorf("create aggregator: %w", err3)
 	}
 	defer agg.Close()
+
 	startTxNum := agg.EndTxNumMinimax()
 	fmt.Printf("Max txNum in files: %d\n", startTxNum)
 
 	interrupt := false
 	if startTxNum == 0 {
-		_, genesisIbs, err := genesis.ToBlock()
+		genBlock, genesisIbs, err := genesis.ToBlock()
 		if err != nil {
 			return err
 		}
@@ -124,6 +131,15 @@ func Erigon23(genesis *core.Genesis, chainConfig *params.ChainConfig, logger log
 		}
 		if err = agg.FinishTx(); err != nil {
 			return err
+		}
+
+		blockRootHash, err := agg.ComputeCommitment(false)
+		if err != nil {
+			return err
+		}
+		genesisRootHash := genBlock.Root()
+		if !bytes.Equal(blockRootHash, genesisRootHash[:]) {
+			return fmt.Errorf("genesis root hash mismatch: expected %x got %x", genesisRootHash, blockRootHash)
 		}
 	}
 
@@ -189,6 +205,7 @@ func Erigon23(genesis *core.Genesis, chainConfig *params.ChainConfig, logger log
 		}
 		agg.SetTx(rwTx)
 		agg.SetTxNum(txNum)
+		readWrapper.ac = agg.MakeContext()
 
 		if txNum, _, err = processBlock23(startTxNum, trace, txNum, readWrapper, writeWrapper, chainConfig, engine, getHeader, b, vmConfig); err != nil {
 			return fmt.Errorf("processing block %d: %w", blockNum, err)
@@ -241,9 +258,9 @@ type stat23 struct {
 }
 
 func (s *stat23) print(aStats libstate.FilesStats, logger log.Logger) {
-	totalFiles := 0
-	totalDatSize := 0
-	totalIdxSize := 0
+	totalFiles := aStats.FilesCount
+	totalDatSize := aStats.DataSize
+	totalIdxSize := aStats.IdxSize
 
 	logger.Info("Progress", "block", s.blockNum, "blk/s", s.speed, "state files", totalFiles,
 		"total dat", libcommon.ByteCount(uint64(totalDatSize)), "total idx", libcommon.ByteCount(uint64(totalIdxSize)),
@@ -353,7 +370,6 @@ func processBlock23(startTxNum uint64, trace bool, txNumStart uint64, rw *Reader
 			}
 		}
 	}
-
 	if txNum >= startTxNum {
 		ibs := state.New(rw)
 		if err := ww.w.AddTraceTo(block.Coinbase().Bytes()); err != nil {
@@ -379,6 +395,15 @@ func processBlock23(startTxNum uint64, trace bool, txNumStart uint64, rw *Reader
 		}
 		if trace {
 			fmt.Printf("FinishTx called for %d block %d\n", txNum, block.NumberU64())
+		}
+	}
+	if commitments && block.Number().Uint64()%uint64(commitmentFrequency) == 0 {
+		rootHash, err := ww.w.ComputeCommitment(trace)
+		if err != nil {
+			return 0, nil, err
+		}
+		if !bytes.Equal(rootHash, header.Root[:]) {
+			return 0, nil, fmt.Errorf("invalid root hash for block %d: expected %x got %x", block.NumberU64(), header.Root, rootHash)
 		}
 	}
 
@@ -408,7 +433,6 @@ func (rw *ReaderWrapper23) ReadAccountData(address common.Address) (*accounts.Ac
 	if len(enc) == 0 {
 		return nil, nil
 	}
-
 	var a accounts.Account
 	a.Reset()
 	pos := 0
@@ -484,6 +508,7 @@ func (ww *WriterWrapper23) UpdateAccountData(address common.Address, original, a
 	}
 	value := make([]byte, l)
 	pos := 0
+
 	if account.Nonce == 0 {
 		value[pos] = 0
 		pos++
