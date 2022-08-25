@@ -129,14 +129,15 @@ func Erigon23(genesis *core.Genesis, chainConfig *params.ChainConfig, logger log
 		if err = genesisIbs.CommitBlock(&params.Rules{}, &WriterWrapper23{w: agg}); err != nil {
 			return fmt.Errorf("cannot write state: %w", err)
 		}
-		if err = agg.FinishTx(); err != nil {
-			return err
-		}
 
 		blockRootHash, err := agg.ComputeCommitment(false)
 		if err != nil {
 			return err
 		}
+		if err = agg.FinishTx(); err != nil {
+			return err
+		}
+
 		genesisRootHash := genBlock.Root()
 		if !bytes.Equal(blockRootHash, genesisRootHash[:]) {
 			return fmt.Errorf("genesis root hash mismatch: expected %x got %x", genesisRootHash, blockRootHash)
@@ -390,20 +391,21 @@ func processBlock23(startTxNum uint64, trace bool, txNumStart uint64, rw *Reader
 			return 0, nil, fmt.Errorf("committing block %d failed: %w", block.NumberU64(), err)
 		}
 
+		if commitments && block.Number().Uint64()%uint64(commitmentFrequency) == 0 {
+			rootHash, err := ww.w.ComputeCommitment(trace)
+			if err != nil {
+				return 0, nil, err
+			}
+			if !bytes.Equal(rootHash, header.Root[:]) {
+				return 0, nil, fmt.Errorf("invalid root hash for block %d: expected %x got %x", block.NumberU64(), header.Root, rootHash)
+			}
+		}
+
 		if err := ww.w.FinishTx(); err != nil {
 			return 0, nil, fmt.Errorf("failed to finish tx: %w", err)
 		}
 		if trace {
 			fmt.Printf("FinishTx called for %d block %d\n", txNum, block.NumberU64())
-		}
-	}
-	if commitments && block.Number().Uint64()%uint64(commitmentFrequency) == 0 {
-		rootHash, err := ww.w.ComputeCommitment(trace)
-		if err != nil {
-			return 0, nil, err
-		}
-		if !bytes.Equal(rootHash, header.Root[:]) {
-			return 0, nil, fmt.Errorf("invalid root hash for block %d: expected %x got %x", block.NumberU64(), header.Root, rootHash)
 		}
 	}
 
