@@ -130,7 +130,7 @@ func Erigon23(genesis *core.Genesis, chainConfig *params.ChainConfig, logger log
 			return fmt.Errorf("cannot write state: %w", err)
 		}
 
-		blockRootHash, err := agg.ComputeCommitment(false)
+		blockRootHash, err := agg.ComputeCommitment(true, false)
 		if err != nil {
 			return err
 		}
@@ -142,9 +142,15 @@ func Erigon23(genesis *core.Genesis, chainConfig *params.ChainConfig, logger log
 		if !bytes.Equal(blockRootHash, genesisRootHash[:]) {
 			return fmt.Errorf("genesis root hash mismatch: expected %x got %x", genesisRootHash, blockRootHash)
 		}
+	} else {
+		agg.SetTx(rwTx)
+		agg.SetTxNum(startTxNum)
+		if err := agg.SeekCommitment(); err != nil {
+			return fmt.Errorf("failed to seek commitment to tx %d: %w", startTxNum, err)
+		}
 	}
 
-	logger.Info("Initialised chain configuration", "config", chainConfig)
+	logger.Info("Initialised chain configuration", "startTxNum", startTxNum, "config", chainConfig)
 
 	var (
 		blockNum uint64
@@ -187,6 +193,7 @@ func Erigon23(genesis *core.Genesis, chainConfig *params.ChainConfig, logger log
 	}
 	readWrapper := &ReaderWrapper23{ac: agg.MakeContext(), roTx: rwTx}
 	writeWrapper := &WriterWrapper23{w: agg}
+	mergeNotification := agg.MergeNotifyChannel()
 
 	for !interrupt {
 		blockNum++
@@ -206,20 +213,23 @@ func Erigon23(genesis *core.Genesis, chainConfig *params.ChainConfig, logger log
 		}
 		agg.SetTx(rwTx)
 		agg.SetTxNum(txNum)
-		readWrapper.ac = agg.MakeContext()
 
 		if txNum, _, err = processBlock23(startTxNum, trace, txNum, readWrapper, writeWrapper, chainConfig, engine, getHeader, b, vmConfig); err != nil {
 			return fmt.Errorf("processing block %d: %w", blockNum, err)
 		}
 
 		// Check for interrupts
+		var commit bool
 		select {
 		case interrupt = <-interruptCh:
 			log.Info(fmt.Sprintf("interrupted, please wait for cleanup, next time start with --block %d", blockNum))
+			commit = interrupt
+		case <-mergeNotification:
+			log.Info("db committ due to aggregator merge", "txNum", txNum, "block", blockNum)
+			commit = true
 		default:
 		}
 		// Commit transaction only when interrupted or just before computing commitment (so it can be re-done)
-		commit := interrupt
 		if !commit && (blockNum+1)%uint64(commitmentFrequency) == 0 {
 			var spaceDirty uint64
 			if spaceDirty, _, err = rwTx.(*mdbx.MdbxTx).SpaceDirty(); err != nil {
@@ -392,7 +402,7 @@ func processBlock23(startTxNum uint64, trace bool, txNumStart uint64, rw *Reader
 		}
 
 		if commitments && block.Number().Uint64()%uint64(commitmentFrequency) == 0 {
-			rootHash, err := ww.w.ComputeCommitment(trace)
+			rootHash, err := ww.w.ComputeCommitment(false, trace)
 			if err != nil {
 				return 0, nil, err
 			}
